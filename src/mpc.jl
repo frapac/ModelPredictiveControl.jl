@@ -4,22 +4,21 @@ type MPCSolver
     solver::MathProgBase.AbstractMathProgSolver
     horizon::Int64
     MILP::Bool
-end
 
-function MPCSolver(;
-                   solver=MathProgBase.defaultLPsolver,
-                   horizon=-1,
-                   relaxation=false
-                  )
-    return new(solver, horizon, milp)
+    function MPCSolver(;
+                    solver=MathProgBase.defaultLPsolver,
+                    horizon=-1,
+                    relaxation=false
+                    )
+        return new(solver, horizon, ~relaxation)
+    end
 end
-
 
 
 """Build JuMP Model corresponding to MPC problem at time t.
 
 # Arguments
-* `model::LinearSPModel`
+* `model::LinearLinearSPModel`
 * `t::Int`
     Current time
 * `oracle`
@@ -33,7 +32,7 @@ end
 * `m::JuMP.Model`
 
 """
-function mpcproblem(model::SPModel, mpcsolver::MPCSolver,
+function build(model::LinearSPModel, mpcsolver::MPCSolver,
                     t::Int, oracle::Function, horizon=-1)
     # number of stages in stochastic problem:
     Tf = model.stageNumber
@@ -63,8 +62,8 @@ function mpcproblem(model::SPModel, mpcsolver::MPCSolver,
 
     @variable(m, w0[1:model.dimNoises])
     m.ext[:noise] = @constraint(m, w0 .== oracle(t))
-    cost0 = model.costFunctions(m, t, x[:, 1], u[:, 1], w0)
-    costs = [model.costFunctions(m, t+j-1, x[:, j], u[:, j], oracle(j+t-1)) for j=2:ntime-1]
+    cost0 = model.costFunctions(t, x[:, 1], u[:, 1], w0)
+    costs = [model.costFunctions(t+j-1, x[:, j], u[:, j], oracle(j+t-1)) for j=2:ntime-1]
 
     # Set optimization objective:
     @objective(m, Min, cost0 + sum(costs[i] for i = 1:ntime-2))
@@ -94,7 +93,7 @@ end
 - `u::Array`
     Optimal control found by MPC
 """
-function solve(mpcprob::JuMP.Model, x0::Array)
+function solvempc(mpcprob::JuMP.Model, x0::Array{Float64, 1})
     u = getvariable(mpcprob, :u)
     for i in 1:length(x0)
         JuMP.setRHS(mpcprob.ext[:cons][i], x0[i])
@@ -106,6 +105,7 @@ function solve(mpcprob::JuMP.Model, x0::Array)
     if st == :Optimal
         return collect(getvalue(u)[:, 1])
     else
+        println(mpcprob)
         return zeros(length(u[:, 1]))
     end
 end
@@ -114,7 +114,7 @@ end
 """ Compute MPC optimal control other given scenario.
 
 # Arguments
-* `model::SPModel`
+* `model::LinearSPModel`
 * `mpc::MPC`
 * `x0`
     Initial state
@@ -133,7 +133,7 @@ end
 * `controls`
 
 """
-function simulation(model::SPModel,
+function simulation(model::LinearSPModel,
                     mpcsolver::MPCSolver,
                     scenarios::Array,
                     oraclegen::Function;
@@ -146,7 +146,7 @@ function simulation(model::SPModel,
         real_dynamic = model.dynamics
     end
     if isa(real_cost, Void)
-        real_cost = model.costs
+        real_cost = model.costFunctions
     end
     if isa(realfinalcost, Void)
         realfinalcost = model.finalCost
@@ -154,9 +154,9 @@ function simulation(model::SPModel,
 
     # Get number of timesteps:
     T = model.stageNumber
-    @assert T == size(scenario, 1)
+    @assert T-1 == size(scenarios, 1)
 
-    nb_simulations = size(scenario, 2)
+    nb_simulations = size(scenarios, 2)
 
     # Arrays to store optimal trajectories
     stocks = zeros(T, nb_simulations, model.dimStates)
@@ -172,17 +172,16 @@ function simulation(model::SPModel,
     for t=1:T-1
         # update oracle at time t:
         oracle = oraclegen(t)
-        mpc_prob = mpcproblem(model, mpcsolver, t, oracle)
-
+        mpc_prob = build(model, mpcsolver, t, oracle)
         for k in 1:nb_simulations
             # get previous state:
             xt = stocks[t, k, :]
 
             # find optimal control with MPC:
-            mpccontrol = solve(mpc_prob, xt)
+            mpccontrol = solvempc(mpc_prob, xt)
 
             # get current perturbation
-            ξ = vec(scenario[t, k, :])
+            ξ = vec(scenarios[t, k, :])
 
             costs[k] += real_cost(t, xt, mpccontrol, ξ)
             xf = real_dynamic(t, xt, mpccontrol, ξ)

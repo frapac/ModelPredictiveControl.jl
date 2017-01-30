@@ -4,6 +4,7 @@ module ModelPredictiveControl
 
 using StochDynamicProgramming, ProgressMeter, JuMP, MathProgBase
 
+export MPCSolver, simulation, solve
 include("mpc.jl")
 
 end
